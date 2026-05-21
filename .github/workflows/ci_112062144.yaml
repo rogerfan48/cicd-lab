@@ -1,0 +1,143 @@
+name: CI 112062144
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-112062144-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  typecheck:
+    name: TypeScript typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript typecheck
+        run: npm run typecheck
+
+  prettier:
+    name: Prettier check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Prettier check
+        run: npm run format:check
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Vitest and export JUnit report
+        run: |
+          mkdir -p reports
+          npm test -- --reporter=default --reporter=junit --outputFile.junit=reports/vitest-junit.xml
+
+      - name: Add Vitest results to job summary
+        if: ${{ always() && hashFiles('reports/vitest-junit.xml') != '' }}
+        run: |
+          node <<'EOF'
+          const fs = require('node:fs');
+
+          const xml = fs.readFileSync('reports/vitest-junit.xml', 'utf8');
+          const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+
+          if (!summaryPath) {
+            console.log('GITHUB_STEP_SUMMARY is not available.');
+            process.exit(0);
+          }
+
+          const attr = (source, name) => {
+            const match = source.match(new RegExp(`(?:^|\\s)${name}="([^"]*)"`));
+            return match ? match[1] : '0';
+          };
+
+          const unescapeXml = (value) =>
+            value
+              .replace(/&quot;/g, '"')
+              .replace(/&apos;/g, "'")
+              .replace(/&gt;/g, '>')
+              .replace(/&lt;/g, '<')
+              .replace(/&amp;/g, '&');
+
+          const root = xml.match(/<testsuites\b([^>]*)>/)?.[1] ?? '';
+          const cases = [...xml.matchAll(/<testcase\b([^>]*)(?:>([\s\S]*?)<\/testcase>|\/>)/g)];
+          const rows = cases.map(([, attrs, body = '']) => {
+            const failed = /<(failure|error)\b/.test(body);
+            const skipped = /<skipped\b/.test(body);
+            const status = failed ? 'failed' : skipped ? 'skipped' : 'passed';
+            const name = unescapeXml(attr(attrs, 'name'));
+            const classname = unescapeXml(attr(attrs, 'classname'));
+            const time = Number(attr(attrs, 'time')).toFixed(3);
+            return `| \`${classname}\` | ${name} | ${status} | ${time}s |`;
+          });
+
+          const markdown = [
+            '## Vitest test results',
+            '',
+            '| Metric | Value |',
+            '| --- | ---: |',
+            `| Tests | ${attr(root, 'tests')} |`,
+            `| Failures | ${attr(root, 'failures')} |`,
+            `| Errors | ${attr(root, 'errors')} |`,
+            `| Duration | ${Number(attr(root, 'time')).toFixed(3)}s |`,
+            '',
+            '| File | Test case | Status | Time |',
+            '| --- | --- | --- | ---: |',
+            ...rows
+          ].join('\n');
+
+          fs.appendFileSync(summaryPath, `${markdown}\n`);
+          EOF
+
+      - name: Upload Vitest JUnit report
+        if: ${{ always() && env.ACT != 'true' && hashFiles('reports/vitest-junit.xml') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-junit-report
+          path: reports/vitest-junit.xml
+          if-no-files-found: error
